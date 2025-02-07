@@ -1,28 +1,22 @@
-FROM alpine:latest
+# Use an official Ubuntu base image
+FROM ubuntu:22.04
+ENV DEBIAN_FRONTEND=noninteractive
 
-# Install dependencies with cache cleanup
-RUN apk add --no-cache wireguard-tools iptables bash curl jq && \
-    rm -rf /var/cache/apk/*
+# Install WireGuard and required tools
+RUN apt-get update && \
+    apt-get install -y wireguard iproute2 iptables curl && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 
-# Create necessary directories
-RUN mkdir -p /etc/wireguard/clients && \
-    mkdir -p /var/run/wireguard
+# Create WireGuard configuration directory
+RUN mkdir -p /etc/wireguard && chmod 700 /etc/wireguard
 
-# Copy entrypoint script
+# Copy the entrypoint script into the image
 COPY entrypoint.sh /entrypoint.sh
-
-# Set permissions
 RUN chmod +x /entrypoint.sh
 
-# Environment variables
-ENV SERVER_PORT=51820
-ENV VPN_SUBNET=10.8.0.0/24
-ENV CLIENT_DNS=1.1.1.1
-ENV PEER_ALLOWED_IPS="0.0.0.0/0, ::/0"
-ENV LAN_SUBNET=192.168.1.0/24
+# Expose the WireGuard UDP port (default 51820)
+EXPOSE 51820/udp
 
-# Expose WireGuard port
-EXPOSE ${SERVER_PORT}/udp
-
-# Set entrypoint
+# Run the entrypoint script on container start
 ENTRYPOINT ["/entrypoint.sh"]

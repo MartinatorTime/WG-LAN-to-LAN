@@ -1,70 +1,90 @@
 #!/bin/bash
+set -e
 
-# Create directory structure if missing
-mkdir -p /etc/wireguard/clients
+# --- Configuration Variables ---
+# You may override these by passing environment variables when running the container.
+# SERVER_PORT: UDP port that WireGuard will listen on (default: 51820)
+# SERVER_VPN_IP: The WireGuard IP for the server (with subnet, e.g. 10.0.0.1/24)
+# CLIENT_VPN_IP: The WireGuard IP for the client (usually a /32, e.g. 10.0.0.2/32)
+# CLIENT_LAN: (Optional) The client’s LAN network that should be routed via the VPN (default: 192.168.1.0/24)
+# SERVER_ENDPOINT: The public IP or DNS name of your server – used in the client config
+SERVER_PORT=${SERVER_PORT:-51820}
+SERVER_VPN_IP=${SERVER_VPN_IP:-10.0.0.1/24}
+CLIENT_VPN_IP=${CLIENT_VPN_IP:-10.0.0.2/32}
+CLIENT_LAN=${CLIENT_LAN:-192.168.1.0/24}
+SERVER_ENDPOINT=${SERVER_ENDPOINT:-"your.server.domain"}  # <-- Replace or override at runtime!
 
-# Enable IP forwarding at kernel level
-echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
-echo "net.ipv6.conf.all.forwarding=1" >> /etc/sysctl.conf
-sysctl -p
+WG_INTERFACE="wg0"
+WG_CONFIG="/etc/wireguard/${WG_INTERFACE}.conf"
+CLIENT_CONFIG="/client.conf"
 
-# Generate server keys if missing
-if [ ! -f /etc/wireguard/privatekey ]; then
-  umask 077
-  wg genkey | tee /etc/wireguard/privatekey | wg pubkey > /etc/wireguard/publickey
+echo "Starting auto‑configuration for WireGuard..."
+echo "  Server VPN IP: ${SERVER_VPN_IP}"
+echo "  Client VPN IP: ${CLIENT_VPN_IP}"
+echo "  Listening on UDP port: ${SERVER_PORT}"
+echo "  Server endpoint (for client config): ${SERVER_ENDPOINT}"
+echo "  Client LAN (routed via VPN): ${CLIENT_LAN}"
+
+# --- Generate Keys (if not already present) ---
+umask 077
+
+if [ ! -f /etc/wireguard/server_private.key ]; then
+    echo "Generating server keypair..."
+    wg genkey | tee /etc/wireguard/server_private.key | wg pubkey > /etc/wireguard/server_public.key
 fi
 
-# Get public IP if not set
-if [ -z "$SERVER_PUBLIC_IP" ]; then
-  SERVER_PUBLIC_IP=$(curl -4 -s ifconfig.co)
+if [ ! -f /etc/wireguard/client_private.key ]; then
+    echo "Generating client keypair..."
+    wg genkey | tee /etc/wireguard/client_private.key | wg pubkey > /etc/wireguard/client_public.key
 fi
 
-# Server configuration
-cat > /etc/wireguard/wg0.conf <<EOF
+SERVER_PRIVATE_KEY=$(cat /etc/wireguard/server_private.key)
+SERVER_PUBLIC_KEY=$(cat /etc/wireguard/server_public.key)
+CLIENT_PRIVATE_KEY=$(cat /etc/wireguard/client_private.key)
+CLIENT_PUBLIC_KEY=$(cat /etc/wireguard/client_public.key)
+
+# --- Create WireGuard Server Configuration ---
+cat > ${WG_CONFIG} <<EOF
 [Interface]
-PrivateKey = $(cat /etc/wireguard/privatekey)
-Address = ${VPN_SUBNET%/*}.1/24
+Address = ${SERVER_VPN_IP}
 ListenPort = ${SERVER_PORT}
-PostUp = iptables -A FORWARD -i wg0 -j ACCEPT; iptables -A FORWARD -o wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
-PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -D FORWARD -o wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE
-EOF
-
-# Client generation function
-generate_client() {
-  CLIENT_NAME=$1
-  CLIENT_IP="${VPN_SUBNET%/*}.$((2 + $(ls /etc/wireguard/clients | wc -l)))"
-  CLIENT_PRIVKEY=$(wg genkey | tee /etc/wireguard/clients/${CLIENT_NAME}.key)
-  CLIENT_PUBKEY=$(echo ${CLIENT_PRIVKEY} | wg pubkey)
-
-  cat >> /etc/wireguard/wg0.conf <<EOF
+PrivateKey = ${SERVER_PRIVATE_KEY}
+# Enable forwarding and NAT (adjust interface "eth0" if needed)
+PostUp = iptables -A FORWARD -i %i -o %i -j ACCEPT; \
+         iptables -A FORWARD -i %i -o eth0 -j ACCEPT; \
+         iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+PostDown = iptables -D FORWARD -i %i -o %i -j ACCEPT; \
+           iptables -D FORWARD -i %i -o eth0 -j ACCEPT; \
+           iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE
 
 [Peer]
-PublicKey = ${CLIENT_PUBKEY}
-AllowedIPs = ${CLIENT_IP}/32, ${LAN_SUBNET}
+# Client configuration
+PublicKey = ${CLIENT_PUBLIC_KEY}
+AllowedIPs = ${CLIENT_VPN_IP}, ${CLIENT_LAN}
 EOF
 
-  cat > "/etc/wireguard/clients/${CLIENT_NAME}.conf" <<EOF
+echo "Server configuration written to ${WG_CONFIG}"
+
+# --- Create WireGuard Client Configuration ---
+cat > ${CLIENT_CONFIG} <<EOF
 [Interface]
-PrivateKey = ${CLIENT_PRIVKEY}
-Address = ${CLIENT_IP}/24
-DNS = ${CLIENT_DNS}
+PrivateKey = ${CLIENT_PRIVATE_KEY}
+Address = ${CLIENT_VPN_IP}
 
 [Peer]
-PublicKey = $(cat /etc/wireguard/publickey)
-Endpoint = ${SERVER_PUBLIC_IP}:${SERVER_PORT}
-AllowedIPs = ${PEER_ALLOWED_IPS}
+PublicKey = ${SERVER_PUBLIC_KEY}
+Endpoint = ${SERVER_ENDPOINT}:${SERVER_PORT}
+AllowedIPs = 0.0.0.0/0, ::/0
 PersistentKeepalive = 25
 EOF
-}
 
-# Generate initial client if none exist
-if [ ! -f /etc/wireguard/clients/client1.conf ]; then
-  generate_client "client1"
-fi
+echo "Client configuration written to ${CLIENT_CONFIG}"
+echo "==> You can download the client configuration from the container (e.g., via 'docker cp')"
 
-# Start WireGuard with clean interface
-wg-quick down wg0 2>/dev/null
-wg-quick up wg0
+# --- Bring Up the WireGuard Interface ---
+echo "Starting WireGuard interface '${WG_INTERFACE}'..."
+wg-quick up ${WG_INTERFACE}
 
-# Keep container running
+# --- Keep the Container Running ---
+echo "WireGuard is running. Tail logs to keep the container alive."
 tail -f /dev/null
