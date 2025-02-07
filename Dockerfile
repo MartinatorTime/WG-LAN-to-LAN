@@ -1,11 +1,12 @@
-# Use Alpine Linux as base image
 FROM alpine:latest
 
-# Install WireGuard and dependencies
-RUN apk add --no-cache wireguard-tools iptables bash
+# Install dependencies with cache cleanup
+RUN apk add --no-cache wireguard-tools iptables bash curl jq && \
+    rm -rf /var/cache/apk/*
 
-# Create directories for WireGuard configuration
-RUN mkdir -p /etc/wireguard/clients
+# Create necessary directories
+RUN mkdir -p /etc/wireguard/clients && \
+    mkdir -p /var/run/wireguard
 
 # Copy entrypoint script
 COPY entrypoint.sh /entrypoint.sh
@@ -22,9 +23,6 @@ ENV LAN_SUBNET=192.168.1.0/24
 
 # Expose WireGuard port
 EXPOSE ${SERVER_PORT}/udp
-
-# Persist WireGuard config
-VOLUME [ "/etc/wireguard" ]
 
 # Set entrypoint
 ENTRYPOINT ["/entrypoint.sh"]
